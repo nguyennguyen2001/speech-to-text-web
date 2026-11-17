@@ -77,6 +77,20 @@
 
     <div class="row">
       <div>
+        <label for="mode">Chế độ</label>
+        <select id="mode">
+          <option value="groq" selected>⚡ Groq API – rất nhanh</option>
+          <option value="local">💻 Trên trình duyệt – chậm, không cần key</option>
+        </select>
+      </div>
+      <div id="keyBox" style="flex:1; min-width:220px">
+        <label for="apiKey">Groq API key (<a href="https://console.groq.com/keys" target="_blank" rel="noopener">lấy miễn phí</a>)</label>
+        <input id="apiKey" type="password" placeholder="gsk_..." style="width:100%; font:inherit; padding:9px 12px; border-radius:9px; border:1px solid var(--border); background:transparent; color:var(--text)" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
         <label for="lang">Ngôn ngữ</label>
         <select id="lang">
           <option value="vietnamese" selected>Tiếng Việt</option>
@@ -88,7 +102,7 @@
           <option value="">Tự nhận diện</option>
         </select>
       </div>
-      <div>
+      <div id="modelBox">
         <label for="model">Mô hình</label>
         <select id="model">
           <option value="onnx-community/whisper-tiny">Tiny – nhanh (~40MB)</option>
@@ -231,11 +245,55 @@ async function decodeAudio(blob) {
   return mono;
 }
 
+// ---- Chế độ Groq API ----
+const LANG_CODE = { vietnamese: "vi", english: "en", chinese: "zh", japanese: "ja", korean: "ko", french: "fr" };
+const modeSel = $("mode"), apiKeyInput = $("apiKey");
+try { apiKeyInput.value = localStorage.getItem("groqKey") || ""; modeSel.value = localStorage.getItem("mode") || "groq"; } catch {}
+function updateMode() {
+  const groq = modeSel.value === "groq";
+  $("keyBox").style.display = groq ? "" : "none";
+  $("modelBox").style.display = groq ? "none" : "";
+  try { localStorage.setItem("mode", modeSel.value); } catch {}
+}
+modeSel.onchange = updateMode; updateMode();
+apiKeyInput.onchange = () => { try { localStorage.setItem("groqKey", apiKeyInput.value.trim()); } catch {} };
+
+async function runGroq() {
+  const key = apiKeyInput.value.trim();
+  if (!key) throw new Error("Bạn chưa nhập Groq API key.");
+  if (currentBlob.size > 25 * 1024 * 1024) throw new Error("File lớn hơn 25MB (giới hạn gói miễn phí của Groq). Hãy nén/cắt file hoặc dùng chế độ trên trình duyệt.");
+  const fd = new FormData();
+  const ext = (currentBlob.type.split("/")[1] || "webm").split(";")[0];
+  fd.append("file", currentBlob, currentBlob.name || `audio.${ext}`);
+  fd.append("model", "whisper-large-v3-turbo");
+  fd.append("response_format", "verbose_json");
+  const lang = LANG_CODE[$("lang").value];
+  if (lang) fd.append("language", lang);
+  setStatus("Đang tải file lên Groq và nhận dạng…");
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST", headers: { Authorization: "Bearer " + key }, body: fd,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+  chunks = (data.segments || []).map(s => ({ timestamp: [s.start, s.end], text: s.text }));
+  if (!chunks.length) chunks = [{ timestamp: [0, null], text: data.text || "" }];
+  output.value = (data.text || "").trim();
+  renderSegments(); toggleExport(true);
+  setStatus("✅ Hoàn tất!", "ok");
+}
+
 runBtn.onclick = async () => {
   if (!currentBlob) return;
   runBtn.disabled = recBtn.disabled = true;
   output.value = ""; segEl.innerHTML = ""; chunks = [];
   toggleExport(false);
+  if (modeSel.value === "groq") {
+    const t0 = performance.now();
+    try { await runGroq(); setStatus(`✅ Hoàn tất sau ${((performance.now() - t0) / 1000).toFixed(1)} giây!`, "ok"); }
+    catch (err) { setStatus("Lỗi: " + err.message, "err"); }
+    runBtn.disabled = recBtn.disabled = false;
+    return;
+  }
   try {
     setStatus("Đang đọc file âm thanh…");
     const audio = await decodeAudio(currentBlob);
